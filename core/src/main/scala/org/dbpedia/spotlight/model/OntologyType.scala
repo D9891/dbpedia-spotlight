@@ -55,8 +55,10 @@ trait OntologyType extends Serializable {
 /**
  * Types from the DBpedia ontology (hierarchical)
  */
-
+@SerialVersionUID(8037662401509425326L)
 class DBpediaType(var name : String) extends OntologyType {
+
+
 
     name = name.replace(DBpediaType.DBPEDIA_ONTOLOGY_PREFIX, "")
 
@@ -118,7 +120,7 @@ object FreebaseType {
 
   val FREEBASE_RDF_PREFIX = "http://rdf.freebase.com/ns"
 }
-
+@SerialVersionUID(-1220396574888289948L)
 class SchemaOrgType(var name : String) extends OntologyType {
 
     name = name.replace(SchemaOrgType.SCHEMAORG_PREFIX, "")
