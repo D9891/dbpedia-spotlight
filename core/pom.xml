@@ -170,10 +170,10 @@
             <artifactId>fastutil</artifactId>
         </dependency>
 
-        <dependency>
+        <!--dependency>
             <groupId>opennlp</groupId>
             <artifactId>maxent</artifactId>
-        </dependency>
+        </dependency-->
 
         <dependency>
             <groupId>org.apache.opennlp</groupId>
