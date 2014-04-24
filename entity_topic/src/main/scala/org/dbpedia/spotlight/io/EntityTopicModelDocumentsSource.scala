@@ -1,14 +1,15 @@
 package org.dbpedia.spotlight.io
 
 import org.apache.commons.logging.LogFactory
-import scala.concurrent.ExecutionContext
+import scala.concurrent.{Await, Future, ExecutionContext}
 import org.dbpedia.spotlight.spot.Spotter
 import org.dbpedia.spotlight.db.model.{SurfaceFormStore, ResourceStore, TextTokenizer}
 import org.dbpedia.spotlight.db.WikipediaToDBpediaClosure
-import org.dbpedia.spotlight.model.{Feature, DBpediaResourceOccurrence, Text}
+import org.dbpedia.spotlight.model.{DBpediaResource, Feature, DBpediaResourceOccurrence, Text}
 import org.dbpedia.spotlight.exceptions.{NotADBpediaResourceException, DBpediaResourceNotFoundException, SurfaceFormNotFoundException}
 import scala.collection.JavaConversions._
 import scala.Array
+import scala.concurrent.duration.Duration
 
 
 /**
@@ -28,50 +29,62 @@ object EntityTopicModelDocumentsSource {
                              wikiToDBpediaClosure:WikipediaToDBpediaClosure) = new Traversable[EntityTopicDocument] {
 
         def foreach[U](f: (EntityTopicDocument) => U): Unit = {
-            def getDocument(currentContext:Text, currentAnnotations:List[DBpediaResourceOccurrence]) = {
-                val tokens = tokenizer.tokenize(currentContext)
-                currentContext.setFeature(new Feature("tokens", tokens))
-
-                val spots = spotter.extract(currentContext)
-                val entityToMentions =
-                    (currentAnnotations.map(occ => {
-                        var id = 0
-                        try {
-                            id = sfStore.getSurfaceForm(occ.surfaceForm.name).id
-                        }
-                        catch {
-                            case ex:SurfaceFormNotFoundException => log.debug(ex.getMessage)
-                        }
-                        (Some(occ.resource), id)
-                    }) ++ spots.withFilter(spot => !currentAnnotations.exists(_.textOffset == spot.textOffset)).map(spot => {
-                        (None, spot.surfaceForm.id)
-                    })).filter(pair => pair._2 > 0 && candidates(pair._2) != null && candidates(pair._2).length > 0)
-
-
-                val document = EntityTopicDocument(
-                    tokens.withFilter(_.tokenType.id > 0).map(_.tokenType.id).toArray,
-                    tokens.withFilter(_.tokenType.id > 0).map(_ => Int.MinValue).toArray,
-                    entityToMentions.map(_._2).toArray,
-                    entityToMentions.map(em => em._1.map(e => {
-                        var id = Int.MinValue
-                        try {
-                            val uri = wikiToDBpediaClosure.wikipediaToDBpediaURI(e.uri)
-                            id = resStore.getResourceByName(uri).id
-                        }
-                        catch {
-                            case ex: DBpediaResourceNotFoundException => log.debug(ex.getMessage)
-                            case ex: NotADBpediaResourceException => log.debug(e.uri+" -> "+ex.getMessage)
-                        }
-                        id
-                    }).getOrElse(Int.MinValue)).toArray,
-                    entityToMentions.map(_ => Int.MinValue).toArray)
-
-                document
+          def getResourceId(e:DBpediaResource)= {
+            var id = Int.MinValue
+            try {
+              val uri = wikiToDBpediaClosure.wikipediaToDBpediaURI(e.uri)
+              id = resStore.getResourceByName(uri).id
             }
+            catch {
+              case ex: DBpediaResourceNotFoundException => log.debug(ex.getMessage)
+              case ex: NotADBpediaResourceException => log.debug(e.uri+" -> "+ex.getMessage)
+            }
+            id
+          }
+
+          def getDocument(currentContext:Text, currentAnnotations:List[DBpediaResourceOccurrence]) = {
+            val tokens = tokenizer.tokenize(currentContext)
+            currentContext.setFeature(new Feature("tokens", tokens))
+
+            val spots = spotter.extract(currentContext)
+
+            val anchors =
+              currentAnnotations.foldLeft( (List[Int](),List[Int]()) ) { case ((resourceIds,sfIds),occ) =>
+                var id = 0
+                try {
+                  id = sfStore.getSurfaceForm(occ.surfaceForm.name).id
+                }
+                catch {
+                  case ex:SurfaceFormNotFoundException => log.debug(ex.getMessage)
+                }
+                if(id > 0 && candidates(id) != null && candidates(id).length > 0)
+                  (getResourceId(occ.resource) :: resourceIds, id :: sfIds)
+                else (resourceIds,sfIds)
+              }
+
+            val (entities,mentions) = spots.foldLeft(anchors){ case ((resourceIds,sfIds),spot) =>
+              val id = spot.surfaceForm.id
+              if(id > 0 && candidates(id) != null && candidates(id).length > 0 && !currentAnnotations.exists(_.textOffset == spot.textOffset))
+                (Int.MinValue :: resourceIds, id :: sfIds)
+              else (resourceIds,sfIds)
+            }
+
+            val mentionEntities = entities.toArray
+            val tokenArray = tokens.filter(_.tokenType.id > 0).toArray
+
+            val document = EntityTopicDocument(
+              tokenArray.map(_.tokenType.id),
+              tokenArray.map(_ => Int.MinValue),
+              mentions.toArray,
+              mentionEntities,
+              mentionEntities.map(_ => Int.MinValue))
+
+            document
+          }
 
             var currentContext:Text = new Text("")
             var currentAnnotations = List[DBpediaResourceOccurrence]()
-            //var future:Future[U] = null
+            var future:Future[Unit] = null
 
             occSource.foreach(resOcc => {
                 if(currentContext == resOcc.context) {
@@ -80,20 +93,20 @@ object EntityTopicModelDocumentsSource {
                 else {
                     if(currentContext.text != "") {
                         //HACK: parallelize parsing and execution very simply
-                        //if(future != null)
-                        //    Await.result(future,Duration.Inf)
-                        //future = Future {
-                        val doc = getDocument(currentContext,currentAnnotations)
-                        if(!doc.mentions.isEmpty)
-                            f(doc)
-                        //}
+                        if(future != null)
+                            Await.result(future,Duration.Inf)
+                        future = Future {
+                            val doc = getDocument(currentContext,currentAnnotations)
+                            if(!doc.mentions.isEmpty)
+                                f(doc)
+                        }
                     }
 
                     currentContext = resOcc.context
                     currentAnnotations = List(resOcc)
                 }
             })
-            getDocument(currentContext,currentAnnotations)
+            f(getDocument(currentContext,currentAnnotations))
         }
     }
 

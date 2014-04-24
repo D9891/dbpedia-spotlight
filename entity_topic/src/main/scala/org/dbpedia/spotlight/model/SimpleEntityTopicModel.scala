@@ -3,8 +3,9 @@ package org.dbpedia.spotlight.model
 import org.dbpedia.spotlight.db.memory.MemoryCandidateMapStore
 import scala.collection.mutable
 import org.dbpedia.spotlight.io.EntityTopicDocument
-import org.dbpedia.spotlight.storage.CountStore
 import scala.util.Random
+import java.util.concurrent.ConcurrentHashMap
+import scala.collection.JavaConversions._
 
 /**
  * @author dirk
@@ -15,11 +16,14 @@ class SimpleEntityTopicModel(numTopics:Int, numEntities:Int, vocabularySize:Int,
                              alpha: Double, beta: Double, gamma: Double, delta: Double) {
 
     val entityTopicMatrix = Array.ofDim[Int](numTopics,numEntities)
-    val sparseMentionEntityMatrix = Array.tabulate(candMap.candidates.size)(i => {
-        val candCounts = candMap.candidateCounts(i)
-        candMap.candidates(i).zip(candCounts.map(candMap.qc)).foldLeft(mutable.Map[Int,Int]())((acc,p) => {acc += p; acc})
+    val sparseMentionEntityMatrix = Array.tabulate[ConcurrentHashMap[Int,Int]](candMap.candidates.size)(i => {
+        if(candMap.candidates(i) != null){
+            val candCounts = candMap.candidateCounts(i)
+            candMap.candidates(i).zip(candCounts.map(candMap.qc)).foldLeft(new ConcurrentHashMap[Int,Int]())((acc,p) => {acc.put(p._1,p._2); acc})
+        }
+        else new ConcurrentHashMap[Int,Int]()
     })
-    val sparseWordEntityMatrix = Array.fill(vocabularySize)(mutable.HashMap[Int,Int]())
+    val sparseWordEntityMatrix = Array.fill(vocabularySize)(new ConcurrentHashMap[Int,Int]())
     val topicCounts = new Array[Int](numTopics)
     val entityCounts = new Array[Int](numEntities)
     val assignmentCounts = new Array[Int](numEntities)
@@ -45,8 +49,12 @@ class SimpleEntityTopicModel(numTopics:Int, numEntities:Int, vocabularySize:Int,
                 val add = {
                     if (topic == oldTopic) -1 else 0
                 }
-                (docTopicCounts.getOrElse(topic, 0) + add + alpha) *
-                    (entityTopicMatrix(topic)(entity) + add + beta) / (topicCounts(topic) + add + numTopics * beta)
+                if(entity >= 0)
+                  (docTopicCounts.getOrElse(topic, 0) + add + alpha) *
+                      (entityTopicMatrix(topic)(entity) + add + beta) / (topicCounts(topic) + add + numTopics * beta)
+                else
+                  (docTopicCounts.getOrElse(topic, 0) + add + alpha) *
+                    (add + beta) / (topicCounts(topic) + add + numTopics * beta)
             }, 0 until numTopics)
 
             doc.entityTopics(idx) = newTopic
@@ -54,10 +62,12 @@ class SimpleEntityTopicModel(numTopics:Int, numEntities:Int, vocabularySize:Int,
             if(withUpdate) {
                 if (!init && oldTopic >= 0) {
                     topicCounts(oldTopic)-=1
-                    entityTopicMatrix(oldTopic)(entity)-=1
+                    if(entity >= 0)
+                        entityTopicMatrix(oldTopic)(entity)-=1
                 }
                 topicCounts(newTopic)+=1
-                entityTopicMatrix(newTopic)(entity)+=1
+                if(entity >= 0)
+                    entityTopicMatrix(newTopic)(entity)+=1
             }
         })
     }
@@ -92,7 +102,7 @@ class SimpleEntityTopicModel(numTopics:Int, numEntities:Int, vocabularySize:Int,
                         if (entity == oldEntity) -1 else 0
                     }
                     val cte = entityTopicCounts(entity)
-                    val cem = mentionCounts(entity)
+                    val cem = mentionCounts.get(entity)
                     val ce = entityCounts(entity)
 
                     (cte + add + beta) *
@@ -106,7 +116,7 @@ class SimpleEntityTopicModel(numTopics:Int, numEntities:Int, vocabularySize:Int,
             if(withUpdate) {
                 if(!init && oldEntity >= 0) {
                     entityTopicMatrix(topic)(oldEntity) -= 1
-                    mentionCounts(oldEntity) = mentionCounts(oldEntity) - 1
+                    mentionCounts.put(oldEntity, mentionCounts.get(oldEntity) - 1)
                     entityCounts(oldEntity) = entityCounts(oldEntity)-1
                 }
 
@@ -115,7 +125,7 @@ class SimpleEntityTopicModel(numTopics:Int, numEntities:Int, vocabularySize:Int,
                     entityTopicMatrix(topic)(newEntity) += 1
                     //Initialized with anchor counts, so no updates if oldEntity was an anchor and we are in init phase
                     if(!init || oldEntity < 0)
-                        mentionCounts(newEntity) = mentionCounts(newEntity)+ 1
+                        mentionCounts.put(newEntity, mentionCounts.get(newEntity) + 1)
                     entityCounts(newEntity) = entityCounts(newEntity) + 1
                 }
             }
@@ -130,35 +140,36 @@ class SimpleEntityTopicModel(numTopics:Int, numEntities:Int, vocabularySize:Int,
             acc
         })
         val candidateEntities = docEntityCounts.keySet
-        (0 until doc.tokenEntities.length).foreach(idx => {
-            val oldEntity = doc.tokenEntities(idx)
-            val token = doc.tokens(idx)
-            val entityTokenCounts = sparseWordEntityMatrix(token)
+        if(!candidateEntities.isEmpty)
+            (0 until doc.tokenEntities.length).foreach(idx => {
+                val oldEntity = doc.tokenEntities(idx)
+                val token = doc.tokens(idx)
+                val entityTokenCounts = sparseWordEntityMatrix(token)
 
-            val newEntity = sampleFromProportionals(entity => {
-                val add = {
-                    if (entity == oldEntity) -1 else 0
+                val newEntity = sampleFromProportionals(entity => {
+                    val add = {
+                        if (entity == oldEntity) -1 else 0
+                    }
+                    docEntityCounts(entity) *
+                        (entityTokenCounts.getOrElse(entity,0) + add + delta) / (assignmentCounts(entity) + add + vocabularySize * delta)
+                }, candidateEntities)
+
+                doc.tokenEntities(idx) = newEntity
+
+                if(withUpdate) {
+                    if (!init && oldEntity >= 0) {
+                        val oldCount = entityTokenCounts(oldEntity)
+                        if(oldCount == 1)
+                            entityTokenCounts.remove(oldEntity)
+                        else
+                            entityTokenCounts(oldEntity) = oldCount - 1
+                        assignmentCounts(oldEntity) -= 1
+                    }
+
+                    entityTokenCounts += newEntity -> (1 + entityTokenCounts.getOrElse(newEntity,0))
+                    assignmentCounts(newEntity) += 1
                 }
-                docEntityCounts(entity) *
-                    (entityTokenCounts.getOrElse(entity,0) + add + delta) / (assignmentCounts(entity) + add + vocabularySize * delta)
-            }, candidateEntities)
-
-            doc.tokenEntities(idx) = newEntity
-
-            if(withUpdate) {
-                if (!init && oldEntity >= 0) {
-                    val oldCount = entityTokenCounts(oldEntity)
-                    if(oldCount == 0)
-                        entityTokenCounts.remove(oldEntity)
-                    else
-                        entityTokenCounts(oldEntity) = oldCount - 1
-                    assignmentCounts(oldEntity) -= 1
-                }
-
-                entityTokenCounts += newEntity -> (1 + entityTokenCounts.getOrElse(newEntity,0))
-                assignmentCounts(newEntity) += 1
-            }
-        })
+            })
     }
 
     private[model] def sampleFromProportionals(calcProportion:Int => Double, candidates:Traversable[Int]) = {
