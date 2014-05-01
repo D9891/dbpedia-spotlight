@@ -145,6 +145,7 @@ object TrainEntityTopicLocal {
       dir = new File(dataDir, s"etd_$i")
       dir.mkdirs()
       dir.listFiles().foreach(_.delete())
+      ctr = 0
 
       oldDir.listFiles().foreach(file => {
         val in = new Input(new FileInputStream(file))

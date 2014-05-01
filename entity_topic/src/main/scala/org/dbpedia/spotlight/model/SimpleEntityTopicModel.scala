@@ -78,7 +78,7 @@ class SimpleEntityTopicModel(val numTopics: Int, val numEntities: Int, val vocab
 
       doc.entityTopics(idx) = newTopic
 
-      if (withUpdate) {
+      if (withUpdate && oldTopic != newTopic) {
         if (!init && oldTopic >= 0) {
           topicCounts(oldTopic) -= 1
           if (entity >= 0)
@@ -132,14 +132,14 @@ class SimpleEntityTopicModel(val numTopics: Int, val numEntities: Int, val vocab
 
       doc.mentionEntities(idx) = newEntity
 
-      if (withUpdate) {
+      if (withUpdate && oldEntity != newEntity) {
         if (!init && oldEntity >= 0) {
           entityTopicMatrix(topic)(oldEntity) -= 1
           mentionCounts.put(oldEntity, mentionCounts.get(oldEntity) - 1)
           entityCounts(oldEntity) = entityCounts(oldEntity) - 1
         }
 
-        //It is possible, that no entity i found for that mention
+        //It is possible, that no entity is found for that mention
         if (newEntity >= 0) {
           entityTopicMatrix(topic)(newEntity) += 1
           //Initialized with anchor counts, so no updates if oldEntity was an anchor and we are in init phase
@@ -175,7 +175,7 @@ class SimpleEntityTopicModel(val numTopics: Int, val numEntities: Int, val vocab
 
         doc.tokenEntities(idx) = newEntity
 
-        if (withUpdate) {
+        if (withUpdate && oldEntity != newEntity) {
           if (!init && oldEntity >= 0) {
             val oldCount = entityTokenCounts(oldEntity)
             if (oldCount == 1)
