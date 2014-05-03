@@ -51,6 +51,7 @@
         <module>uima</module>
         <module>dist</module>
         <module>rest-tomcat</module>
+        <module>ner</module>
     </modules>
 
     <build>
@@ -236,6 +237,15 @@
             <dependency>
                 <groupId>org.dbpedia.spotlight</groupId>
                 <artifactId>rest</artifactId>
+                <version>${dbpedia.spotlight.version}</version>
+                <!--
+                    License: Apache Software License, Version 2.0
+                -->
+            </dependency>
+
+            <dependency>
+                <groupId>org.dbpedia.spotlight</groupId>
+                <artifactId>ner</artifactId>
                 <version>${dbpedia.spotlight.version}</version>
                 <!--
                     License: Apache Software License, Version 2.0
