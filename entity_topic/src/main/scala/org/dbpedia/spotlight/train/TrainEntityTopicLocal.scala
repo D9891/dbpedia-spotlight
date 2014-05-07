@@ -11,19 +11,19 @@ import org.dbpedia.spotlight.db.tokenize.LanguageIndependentTokenizer
 import org.dbpedia.spotlight.db.stem.SnowballStemmer
 import akka.actor._
 import akka.pattern._
-import org.dbpedia.spotlight.io.AllOccurrenceSource
+import org.dbpedia.spotlight.io.{WikiOccurrenceSource, AllOccurrenceSource, EntityTopicDocument}
 import com.esotericsoftware.kryo.io.{Input, Output}
 import org.dbpedia.extraction.util.Language
 import org.dbpedia.spotlight.model._
 import scala.concurrent.Await
 import scala.concurrent.duration.Duration
 import akka.util.Timeout
-import akka.routing.RoundRobinRouter
+import akka.routing.{Broadcast, BalancingPool, SmallestMailboxRouter, RoundRobinRouter}
 import scala.collection.JavaConversions._
 import org.dbpedia.spotlight.exceptions.{SurfaceFormNotFoundException, NotADBpediaResourceException, DBpediaResourceNotFoundException}
 import scala.Some
-import org.dbpedia.spotlight.io.EntityTopicDocument
 import org.dbpedia.spotlight.db.model.{SurfaceFormStore, ResourceStore, TextTokenizer}
+import java.util.concurrent.TimeUnit
 
 
 /**
@@ -103,15 +103,16 @@ object TrainEntityTopicLocal {
 
     implicit val system = ActorSystem("ET")
 
-    val writer = ActorDSL.actor(new WriterActor(cacheSize, kryo))
-    var sampler = system.actorOf(Props(classOf[SamplerActor], model, writer).withRouter(RoundRobinRouter(math.max(1, parallelism / 3 * 2 - 1))))
-    val parser = system.actorOf(Props(classOf[ParserActor], sampler, spotter, tokenizer,
+    val writer = system.actorOf(Props(classOf[WriterActor],cacheSize, kryo))
+    var sampler = system.actorOf(BalancingPool(math.max(1, parallelism / 3 * 2 - 1)).props(Props(classOf[SamplerActor], model, writer)))
+    val parser = system.actorOf(BalancingPool(math.max(1, parallelism / 3 - 1)).props(Props(classOf[ParserActor], sampler, spotter, tokenizer,
       resStore, sfStore, candMapStore.asInstanceOf[MemoryCandidateMapStore].candidates,
-      wikipediaToDBpediaClosure).withRouter(RoundRobinRouter(math.max(1, parallelism / 3 - 1))))
+      wikipediaToDBpediaClosure)))
 
+    implicit val timeout =  Timeout(10,TimeUnit.HOURS)
 
     var ctr = 0
-    val occSource = AllOccurrenceSource.fromXMLDumpFile(wikidump, Language.English)
+    val occSource = WikiOccurrenceSource.fromXMLDumpFile(wikidump, Language.English)
 
     var currentContext: Text = new Text("")
     var currentAnnotations = List[DBpediaResourceOccurrence]()
@@ -133,10 +134,15 @@ object TrainEntityTopicLocal {
       }
     })
     parser !(currentContext, currentAnnotations)
-    Await.result((sampler ? "done?")(Timeout(300000)), Duration.apply(300, scala.concurrent.duration.SECONDS))
-    system.stop(sampler)
-    system.stop(parser)
-    sampler = system.actorOf(Props(classOf[SamplerActor], model, writer).withRouter(RoundRobinRouter(math.max(1, parallelism - 2))))
+
+    parser ! Broadcast(PoisonPill)
+    sampler ! Broadcast(PoisonPill)
+
+    while(!parser.isTerminated || !sampler.isTerminated)
+      Thread.sleep(1000) //check each second
+    Await.result(writer ? "write and reset",Duration.Inf)
+
+    sampler = system.actorOf(BalancingPool(math.max(1, parallelism - 2)).props(Props(classOf[SamplerActor], model, writer)))
 
     SimpleEntityTopicModel.toFile(new File(dataDir, "model0"), model)
     init = false
@@ -158,9 +164,13 @@ object TrainEntityTopicLocal {
             LOG.info(ctr + " entity-topic-documents pushed")
           }
         })
-        Await.result((sampler ? "done?")(Timeout(300000)), Duration.apply(300, scala.concurrent.duration.SECONDS))
       })
-      Await.result((sampler ? "done?")(Timeout(300000)), Duration.apply(300, scala.concurrent.duration.SECONDS))
+      sampler ! Broadcast(PoisonPill)
+      while(!sampler.isTerminated)
+        Thread.sleep(1000) //check each second
+      sampler = system.actorOf(BalancingPool(math.max(1, parallelism - 2)).props(Props(classOf[SamplerActor], model, writer)))
+      Await.result(writer ? "write and reset",Duration.Inf)
+
       SimpleEntityTopicModel.toFile(new File(dataDir, s"model$i"), model)
     })
 
@@ -184,7 +194,6 @@ object TrainEntityTopicLocal {
           case e: Throwable => LOG.error("Error sampling a document! But don't worry the party goes on without it!\n" + doc.toString + "\n" + e.printStackTrace())
         }
       case counter: Int => LOG.info(counter + " entity-topic-documents sampled")
-      case "done?" => sender ! "yeah"
     }
   }
 
@@ -197,12 +206,18 @@ object TrainEntityTopicLocal {
       case doc: EntityTopicDocument =>
         cached(currentCacheSize) = doc
         currentCacheSize += 1
+        counter += 1
         if (currentCacheSize == cacheSize) {
           writeDocuments(new File(dir, "etd_" + counter), cached, kryo)
-          counter += 1
           currentCacheSize = 0
-          LOG.info((counter * cacheSize) + " entity-topic-documents written")
+          LOG.info(counter + " entity-topic-documents written")
         }
+      case "write and reset" =>
+        writeDocuments(new File(dir, "etd_" + counter), cached.take(currentCacheSize), kryo)
+        LOG.info(counter + " entity-topic-documents written")
+        currentCacheSize = 0
+        counter = 0
+        sender ! "done"
     }
   }
 

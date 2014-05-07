@@ -187,6 +187,12 @@
     <dependencyManagement>
         <dependencies>
             <dependency>
+                <groupId>org.scala-lang</groupId>
+                <artifactId>scala-library</artifactId>
+                <version>${scala.compiler.version}</version>
+            </dependency>
+
+            <dependency>
                 <groupId>org.dbpedia.spotlight</groupId>
                 <artifactId>core</artifactId>
                 <version>${dbpedia.spotlight.version}</version>
@@ -552,7 +558,7 @@
             <dependency>
                 <groupId>com.typesafe.akka</groupId>
                 <artifactId>akka-actor_2.10</artifactId>
-                <version>2.2.3</version>
+                <version>2.3.2</version>
                 <!--
                 License: Apache Software License, Version 2.0
                 -->

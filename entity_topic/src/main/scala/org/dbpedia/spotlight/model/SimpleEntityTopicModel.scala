@@ -270,4 +270,9 @@ object SimpleEntityTopicModel {
     kryo.writeObject(out, model.assignmentCounts)
     out.close()
   }
+
+  def main(args:Array[String]) {
+    val model = fromFile(new File("/home/dirk/model0"))
+    model
+  }
 }
