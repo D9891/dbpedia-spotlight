@@ -240,6 +240,11 @@
             <artifactId>akka-actor</artifactId>
         </dependency>
 
+        <dependency>
+            <groupId>cc.factorie</groupId>
+            <artifactId>factorie</artifactId>
+        </dependency>
+
 
     </dependencies>
 
