@@ -13,16 +13,14 @@ import org.dbpedia.spotlight.db.tokenize.LanguageIndependentTokenizer
 import java.util.{Locale}
 import org.dbpedia.spotlight.db.stem.SnowballStemmer
 import scala.collection.mutable
-import org.dbpedia.spotlight.storage.{RedisCountStore, LocalCountStore, CountStoreConfiguration, CountStore}
+import org.dbpedia.spotlight.storage.{RedisCountStore, CountStoreConfiguration, CountStore}
 import scala.Predef._
 import com.esotericsoftware.kryo.Kryo
 import org.apache.spark.rdd.RDD
-import org.apache.spark.streaming.StreamingContext._
 import org.apache.spark.streaming.StreamingContext
-import org.dbpedia.spotlight.io.EntityTopicDocument
 import org.apache.spark.serializer.KryoRegistrator
-import com.esotericsoftware.kryo.io.{Input, Output}
 import org.apache.commons.logging.LogFactory
+import org.dbpedia.spotlight.model.EntityTopicDocument
 
 
 /**

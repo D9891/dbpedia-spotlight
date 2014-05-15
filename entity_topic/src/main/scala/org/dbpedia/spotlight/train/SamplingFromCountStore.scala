@@ -1,9 +1,9 @@
 package org.dbpedia.spotlight.train
 
-import org.dbpedia.spotlight.io.EntityTopicDocument
 import org.dbpedia.spotlight.storage.CountStore
 import scala.util.Random
 import scala.collection.mutable
+import org.dbpedia.spotlight.model.EntityTopicDocument
 
 /**
  * @author dirk
