@@ -1,5 +1,7 @@
 package org.dbpedia.spotlight.model
 
+import org.dbpedia.spotlight.model.{Token, Paragraph}
+
 /**
  * @author dirk
  *          Date: 5/15/14
