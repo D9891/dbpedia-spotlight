@@ -1,8 +1,10 @@
 package org.dbpedia.spotlight.model
 
 import org.dbpedia.spotlight.disambiguate.ParagraphDisambiguator
-import org.dbpedia.spotlight.exceptions.{InputException, ItemNotFoundException, SearchException}
-import org.dbpedia.spotlight.db.model.{TextTokenizer, SurfaceFormStore, ResourceStore}
+import org.dbpedia.spotlight.exceptions.{SurfaceFormNotFoundException, InputException, ItemNotFoundException, SearchException}
+import org.dbpedia.spotlight.db.model.{CandidateMapStore, TextTokenizer, SurfaceFormStore, ResourceStore}
+import org.dbpedia.spotlight.db.memory.MemoryCandidateMapStore
+import org.dbpedia.spotlight.model.EntityTopicDocument
 
 /**
  * @author dirk
@@ -12,7 +14,13 @@ import org.dbpedia.spotlight.db.model.{TextTokenizer, SurfaceFormStore, Resource
 class EntityTopicModelDisambiguator(val model:SimpleEntityTopicModel,
                                     val resStore:ResourceStore,
                                     val sfStore:SurfaceFormStore,
+                                    val candMap:MemoryCandidateMapStore = null,
+                                    val burnIn:Int = 10,
+                                    val nrOfSamples:Int = 100,
                                     val tokenizer:TextTokenizer = null) extends ParagraphDisambiguator {
+
+  model.candMap = candMap
+
   /**
    * Executes disambiguation per paragraph (collection of occurrences).
    * Can be seen as a classification task: unlabeled instances in, labeled instances out.
@@ -39,27 +47,46 @@ class EntityTopicModelDisambiguator(val model:SimpleEntityTopicModel,
    * @throws InputException
    */
   def bestK(paragraph: Paragraph, k: Int): Map[SurfaceFormOccurrence, List[DBpediaResourceOccurrence]] = {
-    paragraph.occurrences.foreach(occ => if(occ.surfaceForm.id < 0) occ.surfaceForm.id = sfStore.getSurfaceForm(occ.surfaceForm.name).id)
+    paragraph.occurrences.foreach(occ => {
+      try {
+        if(occ.surfaceForm.id < 0)
+          occ.surfaceForm.id = sfStore.getSurfaceForm(occ.surfaceForm.name).id
+      }
+      catch {
+        case e:SurfaceFormNotFoundException => //Nothing to do here
+      }
+    })
+
     if(tokenizer != null)
       tokenizer.tokenizeMaybe(paragraph.text)
+
     val doc = EntityTopicDocument.fromParagraph(paragraph)
     //Burn In
-    model.gibbsSampleDocument(doc,10)
+    model.gibbsSampleDocument(doc,burnIn)
 
     //Take samples
-    val iterations = 100
-    val stats = model.gibbsSampleDocument(doc, iterations, returnStatistics = true)
+    val stats = model.gibbsSampleDocument(doc, nrOfSamples, returnStatistics = true)
 
-    paragraph.occurrences.zip(stats).foldLeft(Map[SurfaceFormOccurrence, List[DBpediaResourceOccurrence]]()) {
+    paragraph.occurrences.filter(_.surfaceForm.id >= 0).zip(stats).foldLeft(Map[SurfaceFormOccurrence, List[DBpediaResourceOccurrence]]()) {
       case (acc,(sfOcc,counts)) =>
-        val chosen = counts.toSeq.sortBy(-_._2).take(k)
+        var chosen = counts.toSeq.sortBy(-_._2).take(k)
 
-        acc + (sfOcc -> chosen.map {case (resId, count) => new DBpediaResourceOccurrence(
+        if(chosen.size < k && candMap != null) {
+          val diff = k - chosen.size
+          val cands = candMap.getCandidates(sfOcc.surfaceForm)
+          if(cands != null && !cands.isEmpty) {
+            val rest = cands.filter(r => !counts.contains(r.resource.id)).take(diff)
+            chosen ++= rest.map(r => (r.resource.id,0))
+          }
+        }
+
+        acc + (sfOcc -> chosen.flatMap {case (resId, count) => if(resId >= 0) Some(new DBpediaResourceOccurrence(
           "",resStore.getResource(resId),
           sfOcc.surfaceForm,
           sfOcc.context,
           sfOcc.textOffset,
-          contextualScore = count.toDouble/iterations)
+          contextualScore = count.toDouble/nrOfSamples))
+          else None
         }.toList)
     }
   }

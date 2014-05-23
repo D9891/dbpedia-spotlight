@@ -35,7 +35,7 @@ object TrainEntityTopicLocal {
 
   private[train] def newKryo = {
     val kryo = new Kryo()
-    kryo.register(classOf[Array[EntityTopicDocument]])
+    kryo.register(classOf[Array[EntityTopicTrainingDocument]])
     kryo
   }
 
@@ -155,6 +155,14 @@ object TrainEntityTopicLocal {
       dir = dump
       //load latest model
       model = SimpleEntityTopicModel.fromFile(dataDir.listFiles().filter(f => f.isFile && f.getName.contains("model")).sortBy(-_.lastModified()).head)
+
+      //Add candidate-map to model for training
+      val modelDataFolder = new File(modelDir, "model")
+      val quantizedCountsStore = MemoryStore.loadQuantizedCountStore(new FileInputStream(new File(modelDataFolder, "quantized_counts.mem")))
+      val resStore = MemoryStore.loadResourceStore(new FileInputStream(new File(modelDataFolder, "res.mem")), quantizedCountsStore)
+      val candMapStore = MemoryStore.loadCandidateMapStore(new FileInputStream(new File(modelDataFolder, "candmap.mem")), resStore, quantizedCountsStore)
+
+      model.candMap = candMapStore
     }
 
 
@@ -172,8 +180,7 @@ object TrainEntityTopicLocal {
       ctr = 0
 
       oldDir.listFiles().foreach(file => {
-        val in = new Input(new FileInputStream(file))
-        val docs = kryo.readObject(in, classOf[Array[EntityTopicDocument]])
+        val docs = loadDocs(file, kryo)
         docs.foreach(doc => {
           sampler ! doc
           ctr += 1
@@ -203,6 +210,14 @@ object TrainEntityTopicLocal {
     System.exit(0)
   }
 
+
+  def loadDocs(file: File, kryo: Kryo)  = {
+    val in = new Input(new FileInputStream(file))
+    val docs = kryo.readObject(in, classOf[Array[EntityTopicTrainingDocument]])
+    in.close()
+    docs
+  }
+
   var init = true
   var dir: File = null
 
@@ -210,7 +225,7 @@ object TrainEntityTopicLocal {
     var counter = 0
 
     def receive = {
-      case doc: EntityTopicDocument =>
+      case doc: EntityTopicTrainingDocument =>
         try {
           model.trainWithDocument(doc, firstTime = init)
           writer ! doc
@@ -223,12 +238,12 @@ object TrainEntityTopicLocal {
   }
 
   private class WriterActor(cacheSize: Int, kryo: Kryo) extends Actor {
-    var cached = new Array[EntityTopicDocument](cacheSize)
+    var cached = new Array[EntityTopicTrainingDocument](cacheSize)
     var currentCacheSize = 0
     var counter = 0
 
     def receive = {
-      case doc: EntityTopicDocument =>
+      case doc: EntityTopicTrainingDocument =>
         cached(currentCacheSize) = doc
         currentCacheSize += 1
         counter += 1
@@ -246,7 +261,7 @@ object TrainEntityTopicLocal {
     }
   }
 
-  private def writeDocuments(file: File, docs: Array[EntityTopicDocument], kryo: Kryo) {
+  private def writeDocuments(file: File, docs: Array[EntityTopicTrainingDocument], kryo: Kryo) {
     val out = new Output(new FileOutputStream(file))
     kryo.writeObject(out, docs)
     out.close()
@@ -304,7 +319,7 @@ object TrainEntityTopicLocal {
       val mentionEntities = resources.toArray
       val tokenArray = tokens.filter(_.tokenType.id > 0).toArray
 
-      val document = EntityTopicDocument(
+      val document = new EntityTopicTrainingDocument(
         tokenArray.map(_.tokenType.id),
         tokenArray.map(_ => Int.MinValue),
         mentions.toArray,

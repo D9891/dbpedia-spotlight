@@ -23,7 +23,7 @@ import org.dbpedia.spotlight.log.SpotlightLog
  */
 class SimpleEntityTopicModel(val numTopics: Int, val numEntities: Int, val vocabularySize: Int, val numMentions: Int,
                              val alpha: Double, val beta: Double, val gamma: Double, val delta: Double, create:Boolean = false,
-                             candMap: MemoryCandidateMapStore = null, contextStore:MemoryContextStore = null) {
+                             var candMap: MemoryCandidateMapStore = null, var contextStore:MemoryContextStore = null) {
 
   private val resStore:MemoryResourceStore = if(candMap != null) candMap.resourceStore.asInstanceOf[MemoryResourceStore] else null
 
@@ -55,11 +55,12 @@ class SimpleEntityTopicModel(val numTopics: Int, val numEntities: Int, val vocab
   private def updateCountMap(oldKey:Int,newKey:Int,map:mutable.Map[Int,Int]) {
     if(oldKey != newKey) {
       if(oldKey >= 0) {
-        val oldValue = map(oldKey)
+        val oldValue = map.getOrElse(oldKey,1)
         if(oldValue == 1) map.remove(oldKey)
-        else map(oldKey) = oldValue-1
+        else map += oldKey -> (oldValue-1)
       }
-      map += newKey -> (map.getOrElse(newKey,0) + 1)
+      if(newKey >= 0)
+        map += newKey -> (map.getOrElse(newKey,0) + 1)
     }
   }
 
@@ -140,56 +141,37 @@ class SimpleEntityTopicModel(val numTopics: Int, val numEntities: Int, val vocab
           val oldTopic = doc.entityTopics(idx)
           val mention = doc.mentions(idx)
 
-          //topic
-          val newTopic = if (init && oldTopic >= 0)
-            oldTopic
-          else
-            sampleFromProportionals(topic => {
-              val localAdd = if (topic == oldTopic) -1 else 0
-              val globalAdd = if (training) localAdd else 0
-              if (oldEntity >= 0)
-                (docTopicCounts.getOrElse(topic, 0) + localAdd + alpha) *
-                  (entityTopicMatrix(topic)(oldEntity) + globalAdd + beta) / (topicCounts(topic) + globalAdd + numTopics * beta)
-              else
-                (docTopicCounts.getOrElse(topic, 0) + localAdd + alpha) *
-                  (localAdd + beta) / (topicCounts(topic) + localAdd + numTopics * beta)
-            }, 0 until numTopics)
-
-          doc.entityTopics(idx) = newTopic
-
-          //local update
-          if(i < iterations - 1)
-            updateCountMap(oldTopic, newTopic, docTopicCounts)
-
           //entity
-          val mentionCounts = sparseMentionEntityMatrix(mention)
-          val newEntity = if (init && oldEntity >= 0)
+          val newEntity = if (doc.isInstanceOf[EntityTopicTrainingDocument] && doc.asInstanceOf[EntityTopicTrainingDocument].entityFixed(idx))
             oldEntity
           else {
-            val entityTopicCounts = entityTopicMatrix(newTopic)
-            val cands:Iterable[Int] =
-              if(candMap == null) mentionCounts.keys
+            val mentionCounts = sparseMentionEntityMatrix(mention)
+            var cands:Iterable[Int] =
+              if(candMap == null) mentionCounts.keySet()
               else candMap.candidates(mention)
 
             val candCounts:Map[Int,Int] = if(init && candMap != null) cands.zip(candMap.candidateCounts(mention).map(candMap.qc)).toMap else null
 
-            require(!cands.isEmpty,s"There are no candidates for mention id $mention")
+            if(cands == null || cands.isEmpty) {
+              SpotlightLog.debug(getClass,s"There are no candidates for mention id $mention")
+              cands = Iterable[Int]()
+            }
 
             sampleFromProportionals(entity => {
               val localAdd = if (entity == oldEntity) -1 else 0
-              val add = if (training) localAdd else 0
-              val cte = entityTopicCounts(entity)
+              val globalAdd = if (training) localAdd else 0
+              val cte =
+                if(oldTopic >= 0) entityTopicMatrix(oldTopic)(entity)
+                else 0
               //if initial phase use counts from statistical model
               val (cem,ce) =
                 if(init && candMap != null) (candCounts(entity) ,resStore.qc(resStore.supportForID(entity)))
-                else (mentionCounts.getOrElse(entity,0)+add,entityCounts(entity)+add)
+                else (mentionCounts.getOrElse(entity,0)+globalAdd,entityCounts(entity)+globalAdd)
 
               val docAssCount = docAssignmentCounts.getOrElse(entity, 0)
               val docCount = docEntityCounts.getOrElse(entity,0) + localAdd
-              require(docCount >= 0, s"Document count of entity $entity cannot be lower than 0!\n"+docEntityCounts.toString)
 
-              //if topic has changed, nothing has to be subtracted from global cte
-              (cte + {if(newTopic == oldTopic) add else 0} + beta) *
+              (cte + globalAdd + beta) *
                 (cem + gamma) / (ce + numMentions * gamma) *
                 { if(docCount > 0 && docAssCount > 0 ) math.pow((docCount + 1) / docCount, docAssCount)
                 else 1
@@ -203,7 +185,25 @@ class SimpleEntityTopicModel(val numTopics: Int, val numEntities: Int, val vocab
           updateCountMap(oldEntity,newEntity,docEntityCounts)
 
           if(returnStatistics)
-            updateCountMap(oldEntity,newEntity,stats(idx))
+            stats(idx) += newEntity -> (stats(idx).getOrElse(newEntity,0) + 1)
+
+          //topic
+          val newTopic =
+            sampleFromProportionals(topic => {
+              val localAdd = if (topic == oldTopic) -1 else 0
+              val globalAdd = if (training) localAdd else 0
+              if (newEntity >= 0)
+                (docTopicCounts.getOrElse(topic, 0) + localAdd + alpha) *
+                  (entityTopicMatrix(topic)(newEntity) + {if(newEntity == oldEntity) globalAdd else 0} + beta) / (topicCounts(topic) + globalAdd + numTopics * beta)
+              else
+                (docTopicCounts.getOrElse(topic, 0) + localAdd + alpha) / (topicCounts(topic) + globalAdd + numTopics * beta)
+            }, 0 until numTopics)
+
+          doc.entityTopics(idx) = newTopic
+
+          //local update
+          if(i < iterations - 1)
+            updateCountMap(oldTopic, newTopic, docTopicCounts)
         })
       }
 
@@ -215,21 +215,19 @@ class SimpleEntityTopicModel(val numTopics: Int, val numEntities: Int, val vocab
             val token = doc.tokens(idx)
             val entityTokenCounts = sparseWordEntityMatrix(token)
 
-            val newEntity = if(init && oldEntity >= 0)
-              oldEntity
-            else
+            val newEntity =
               sampleFromProportionals(entity => {
                 //if initial phase and context model is given, use counts from statistical model
+                val add = if (training && entity == oldEntity) -1 else 0
                 val (cew,ce) =
                   if(init && contextStore != null) {
                     val tokens = contextStore.tokens(entity)
                     if(tokens != null) {
-                      val ct = (0 until contextStore.tokens(entity).length).
-                        find(i => contextStore.tokens(entity)(i) == token).map(i => contextStore.qc(contextStore.counts(entity)(i)))
+                      val ct = (0 until tokens.length).
+                        find(i => tokens(i) == token).map(i => contextStore.qc(contextStore.counts(entity)(i)))
                       (ct.getOrElse(0), contextStore.totalTokenCounts(entity))
-                    } else (0, contextStore.totalTokenCounts(entity))
+                    } else (entityTokenCounts.getOrElse(entity, 0)+add, assignmentCounts(entity)+add)
                   } else  {
-                    val add = if (training && entity == oldEntity) -1 else 0
                     (entityTokenCounts.getOrElse(entity, 0)+add, assignmentCounts(entity)+add)
                   }
 
@@ -258,7 +256,9 @@ class SimpleEntityTopicModel(val numTopics: Int, val numEntities: Int, val vocab
       (cand, res)
     }).toList
 
-    if(cands.tail.isEmpty)
+    if(cands.isEmpty)
+      Int.MinValue
+    else if(cands.tail.isEmpty)
       cands.head._1
     else {
       var random = Random.nextDouble() * sum

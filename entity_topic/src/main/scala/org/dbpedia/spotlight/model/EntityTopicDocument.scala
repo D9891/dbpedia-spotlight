@@ -1,6 +1,7 @@
 package org.dbpedia.spotlight.model
 
 import org.dbpedia.spotlight.model.{Token, Paragraph}
+import org.dbpedia.spotlight.train.TrainEntityTopicLocal
 
 /**
  * @author dirk
@@ -27,6 +28,34 @@ case class EntityTopicDocument(tokens: Array[Int],
   }
 }
 
+//entityAssignments is provide information of already fixed entities, this is used for training, s.t. those entities are not sampled but kept as they are
+class EntityTopicTrainingDocument(tokens: Array[Int],
+                                       tokenEntities: Array[Int],
+                                       mentions: Array[Int],
+                                       mentionEntities: Array[Int],
+                                       entityTopics: Array[Int], 
+                                       val entityFixed:Array[Boolean])
+  extends EntityTopicDocument(tokens,
+                              tokenEntities,
+                              mentions,
+                              mentionEntities,
+                              entityTopics) {
+  def this(tokens: Array[Int],
+           tokenEntities: Array[Int],
+           mentions: Array[Int],
+           mentionEntities: Array[Int],
+           entityTopics: Array[Int]) =
+    this(tokens,
+         tokenEntities,
+         mentions,
+         mentionEntities,
+         entityTopics,
+         mentionEntities.map(e => e >= 0))
+
+  def this() = this(Array[Int](), Array[Int](), Array[Int](), Array[Int](), Array[Int](), Array[Boolean]())
+
+}
+
 object EntityTopicDocument {
   def fromParagraph(p:Paragraph) = {
     val tokens = p.text.feature("tokens").get.value.asInstanceOf[List[Token]]
@@ -42,4 +71,5 @@ object EntityTopicDocument {
       mentionIds.map(_ => Int.MinValue)
     )
   }
+
 }
